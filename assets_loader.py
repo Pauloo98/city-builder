@@ -1,0 +1,128 @@
+# assets_loader.py
+import os
+import pygame as pg
+
+BASE_DIR   = os.path.dirname(__file__)
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+UI_DIR     = os.path.join(ASSETS_DIR, "ui")
+TILES_DIR  = os.path.join(ASSETS_DIR, "tiles")
+
+ICON_FILES = {
+    # HUD comuns
+    "money":        "money.png",
+    "people":       "people.png",
+    "smile":        "smile.png",
+    "bolt":         "bolt.png",
+    "water":        "water.png",
+    "pause":        "pause.png",
+    "play":         "play.png",
+    "percent":      "percent.png",
+    "lock":         "lock.png",
+
+    # categorias
+    "home":         "home.png",
+    "building":     "building.png",
+    "factory":      "factory.png",
+    "services":     "services.png",
+    "demolish":     "demolish.png",
+
+    # itens específicos (se existirem os PNGs; caso contrário cai em fallback)
+    "city_hall":    "city_hall.png",
+    "central_bank": "central_bank.png",
+    "road":         "road.png",
+    "casa":         "casa.png",
+    "condominio":   "condominio.png",
+    "loja":         "loja.png",
+    "fabrica":      "fabrica.png",
+    "usina":        "usina.png",
+    "parque":       "parque.png",
+    "favela":       "favela.png",
+    "farm":         "farm.png",
+    "police":       "police.png",
+    "hospital":     "hospital.png",
+    "water_plant":  "water_plant.png",
+    "health":       "health.png",
+    "crime":        "crime.png",
+    "auto":         "auto.png",
+}
+
+TILE_FILES = {
+    "empty":        "empty.png",
+    "residential":  "residential.png",
+    "commercial":   "commercial.png",
+    "industrial":   "industrial.png",
+    "utility":      "utility.png",
+    "university":   "services.png",    # mapeia para services se não houver específico
+    "park":         "park.png",
+    "blight":       "blight.png",
+    "road":         "road.png",
+    "city_hall":    "city_hall.png",
+    "central_bank": "central_bank.png",
+    "farm":         "farm.png",
+    "police":       "police.png",
+    "hospital":     "hospital.png",
+    "water_plant":  "water_plant.png",
+}
+
+TILE_STYLES = {
+    "empty":        ((230,244,246),(190,220,230),""),
+    "residential":  ((235,248,240),(100,200,160),"R"),
+    "commercial":   ((244,250,246),(200,230,215),"C"),
+    "industrial":   ((245,236,236),(220,160,160),"I"),
+    "utility":      ((238,240,244),(170,190,210),"E"),
+    "university":   ((236,242,252),(160,180,230),"U"),
+    "park":         ((224,246,230),(140,200,150),"P"),
+    "blight":       ((240,232,232),(190,150,150),"B"),
+    "road":         ((60,66,78),   (110,120,140)," "),
+    "city_hall":    ((230,236,255),(140,160,220),"H"),
+    "central_bank": ((255,244,210),(230,200,120),"B"),
+    "farm":         ((224,236,208),(170,190,150),"F"),
+    "police":       ((232,236,252),(150,160,220),"👮"),
+    "hospital":     ((252,236,236),(220,150,150),"+"),
+    "water_plant":  ((230,244,252),(150,190,220),"W"),
+}
+
+def _safe_load(path: str):
+    try:
+        return pg.image.load(path).convert_alpha()
+    except Exception as e:
+        print(f"[assets] Falha ao carregar {path}: {e}")
+        return None
+
+def _make_tile_surface(size: tuple[int,int], bg, border, label: str):
+    w, h = size
+    surf = pg.Surface((w, h), pg.SRCALPHA)
+    rect = pg.Rect(0, 0, w, h)
+    pg.draw.rect(surf, bg, rect, border_radius=6)
+    pg.draw.rect(surf, border, rect, width=2, border_radius=6)
+    if label:
+        font = pg.font.SysFont(None, max(12, int(min(w,h)*0.45)))
+        img  = font.render(str(label), True, (40,60,90))
+        surf.blit(img, img.get_rect(center=rect.center))
+    return surf
+
+def load_ui() -> dict[str, pg.Surface]:
+    ui = {}
+    for key, filename in ICON_FILES.items():
+        path = os.path.join(UI_DIR, filename)
+        if os.path.exists(path):
+            surf = _safe_load(path)
+            if surf: ui[key] = surf
+    return ui
+
+def load_tiles(tile_size: tuple[int,int]=(48,48)) -> dict[str, pg.Surface]:
+    tiles = {}
+    for key, filename in TILE_FILES.items():
+        path = os.path.join(TILES_DIR, filename)
+        surf = None
+        if os.path.exists(path):
+            surf = _safe_load(path)
+            if surf and (surf.get_width(), surf.get_height()) != tile_size:
+                surf = pg.transform.smoothscale(surf, tile_size)
+        else:
+            bg, border, label = TILE_STYLES.get(key, ((230,244,246),(190,220,230),"?"))
+            surf = _make_tile_surface(tile_size, bg, border, label)
+        tiles[key] = surf
+    return tiles
+
+__all__ = ["load_ui", "load_tiles"]

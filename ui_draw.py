@@ -1,0 +1,242 @@
+# ui_draw.py
+import pygame as pg
+from typing import Optional
+from settings import WIDTH, HEIGHT
+from config_game import CATEGORY_MENU, SUBMENU_ITEMS, UI_ITEM_ICON, BUILD_EFFECTS, TOOLTIPS
+from config_game import MIN_WITHDRAW_THRESHOLD
+
+# básicos
+def draw_text(surface, text, x, y, size=20, color=(240,240,240), center=False):
+    font = pg.font.SysFont(None, size)
+    img = font.render(str(text), True, color)
+    rect = img.get_rect()
+    if center:
+        rect.center = (x, y)
+    else:
+        rect.topleft = (x, y)
+    surface.blit(img, rect)
+
+def draw_panel(surface, x, y, w, h, fill=(245, 249, 252), border=(200, 220, 235), border_w=2, radius=12):
+    r = pg.Rect(x, y, w, h)
+    pg.draw.rect(surface, fill, r, border_radius=radius)
+    pg.draw.rect(surface, border, r, width=border_w, border_radius=radius)
+    return r
+
+def draw_icon_or_fallback(surf, icon_img_map, icon_key, dst_rect, label=None):
+    icon = icon_img_map.get(icon_key) if isinstance(icon_img_map, dict) else None
+    if icon:
+        icon_scaled = pg.transform.smoothscale(icon, (dst_rect.w, dst_rect.h))
+        surf.blit(icon_scaled, dst_rect.topleft)
+    else:
+        pg.draw.ellipse(surf, (255,255,255), dst_rect)
+        if label:
+            draw_text(surf, label, dst_rect.centerx, dst_rect.centery-9, size=18, color=(40,60,90), center=True)
+
+# tooltips
+def draw_tooltip(screen, text, pos):
+    lines = text.split("\n")
+    font_tip = pg.font.SysFont(None, 20)
+    tw = max(font_tip.size(line)[0] for line in lines)
+    th = sum(font_tip.size(line)[1] for line in lines) + (len(lines)-1)*4
+    pad_x, pad_y = 10, 8
+    w = tw + pad_x*2; h = th + pad_y*2
+    mx, my = pos
+    x = min(max(8, mx + 16), WIDTH - w - 8)
+    y = min(max(8, my - h - 16), HEIGHT - h - 8)
+    shadow = pg.Surface((w, h), pg.SRCALPHA)
+    pg.draw.rect(shadow, (0,0,0,70), shadow.get_rect(), border_radius=10)
+    screen.blit(shadow, (x+2, y+2))
+    r = draw_panel(screen, x, y, w, h, fill=(255,255,255), border=(210,230,245), radius=10)
+    cy = r.y + pad_y - 1
+    for line in lines:
+        draw_text(screen, line, r.x + pad_x, cy, size=20, color=(40,60,90))
+        cy += font_tip.size(line)[1] + 4
+
+# HUD topo
+def draw_topbar(screen, ui_icons, COLORS, state, day, month, year, hour, minute,
+                paused, can_withdraw_now_fn, auto_tax, PADDING=12, TOPBAR_H=100):
+    bar = draw_panel(screen, PADDING, PADDING, WIDTH - 2*PADDING, TOPBAR_H,
+                     fill=(250, 253, 255), border=(210, 230, 245), radius=14)
+    rect_map = {}
+    x = bar.left + 16; y = bar.top + 12
+
+    # dinheiro
+    ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "money", ico, "$")
+    draw_text(screen, f"${int(state.money)}", x+28, y-2, size=22, color=(255,205,0))
+    rect_map["money"] = pg.Rect(ico.x, ico.y-2, 110, 28)
+
+    # sacar + barra
+    withdraw_btn = pg.Rect(bar.left + 12, bar.top+58, 120, 30)
+    can_withdraw, _ = can_withdraw_now_fn()
+    pg.draw.rect(screen, (0,170,120) if can_withdraw else (150,160,170), withdraw_btn, border_radius=8)
+    draw_text(screen, "Sacar", withdraw_btn.centerx, withdraw_btn.centery, size=18, color=(255,255,255), center=True)
+    rect_map["withdraw"] = withdraw_btn.copy()
+
+    cap = max(1.0, state.treasury_cap)
+    ratio = max(0.0, min(1.0, state.treasury_pending/cap))
+    prog = pg.Rect(withdraw_btn.right + 8, withdraw_btn.y, 140, 30)
+    pg.draw.rect(screen, (230,236,244), prog, border_radius=8)
+    pg.draw.rect(screen, (90,180,140), pg.Rect(prog.x, prog.y, int(prog.w*ratio), prog.h), border_radius=8)
+    rect_map["treasury_bar"] = prog.copy()
+
+    # auto-saque
+    auto_btn = pg.Rect(prog.right + 8, prog.y, 30, 30)
+    pg.draw.rect(screen, (60,180,220) if auto_tax else (200,210,220), auto_btn, border_radius=6)
+    draw_text(screen, "A", auto_btn.centerx, auto_btn.centery, size=20, color=(255,255,255), center=True)
+    rect_map["auto_tax"] = auto_btn.copy()
+
+    # população
+    x += 140
+    ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "people", ico, "P")
+    draw_text(screen, f"{state.population}", x+28, y-2, size=22, color=(140,190,255))
+    rect_map["people"] = pg.Rect(ico.x, ico.y-2, 80, 26)
+
+    # felicidade
+    x += 90
+    ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "smile", ico, ":)")
+    draw_text(screen, f"{int(state.happiness)}%", x+28, y-2, size=22, color=(80,200,120))
+    rect_map["smile"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+    # inflação
+    x += 90
+    ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "percent", ico, "%")
+    draw_text(screen, f"{int(state.inflation)}%", x+28, y-2, size=22, color=(120,140,180))
+    rect_map["inflation"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+    # alfabetização
+    x += 100
+    ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "services", ico, "A")
+    draw_text(screen, f"{int(state.literacy)}% ALF", x+28, y-2, size=22, color=(90,150,230))
+    rect_map["literacy"] = pg.Rect(ico.x, ico.y-2, 130, 26)
+
+    # linha 2: desemprego, crime, saúde
+    y2 = bar.top + 60
+    ico = pg.Rect(bar.left + 320, y2, 18, 18); draw_icon_or_fallback(screen, ui_icons, "lock", ico, "U")
+    draw_text(screen, f"Desemprego: {int(round(state.unemployment))}%", ico.right+6, y2-2, size=18, color=(180,110,120))
+    rect_map["unemployment"] = pg.Rect(ico.x, ico.y-2, 210, 24)
+
+    ico = pg.Rect(bar.left + 530, y2, 18, 18); draw_icon_or_fallback(screen, ui_icons, "crime", ico, "C")
+    draw_text(screen, f"Crime: {int(round(state.crime))}%", ico.right+6, y2-2, size=18, color=(200,100,120))
+    rect_map["crime"] = pg.Rect(ico.x, ico.y-2, 160, 24)
+
+    ico = pg.Rect(bar.left + 690, y2, 18, 18); draw_icon_or_fallback(screen, ui_icons, "health", ico, "+")
+    draw_text(screen, f"Saúde: {int(round(state.health))}%", ico.right+6, y2-2, size=18, color=(120,180,140))
+    rect_map["health"] = pg.Rect(ico.x, ico.y-2, 160, 24)
+
+    # tempo
+    draw_text(screen, f"{day:02d}/{month:02d}/{year:02d}  {hour:02d}:{minute:02d}", bar.centerx-60, y-2, size=20, color=(60,90,120))
+
+    # energia/água
+    rx = bar.right - 360
+    ico = pg.Rect(rx, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "bolt",  ico, "⚡")
+    draw_text(screen, f"{int(state.power_pct)}%", rx+28, y-2, size=20, color=(255,190,0))
+    rect_map["bolt"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+    rx += 90
+    ico = pg.Rect(rx, y, 20, 20); draw_icon_or_fallback(screen, ui_icons, "water", ico, "W")
+    draw_text(screen, f"{int(state.water_pct)}%", rx+28, y-2, size=20, color=(120,200,255))
+    rect_map["water"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+    # pausa
+    btn = pg.Rect(bar.right-44, bar.top+10, 32, 32)
+    pg.draw.rect(screen, (0, 170, 120) if not paused else (0, 130, 180), btn, border_radius=8)
+    if paused:
+        pg.draw.polygon(screen, (255,255,255), [(btn.left+10, btn.top+6), (btn.left+10, btn.bottom-6), (btn.right-8, btn.centery)])
+    else:
+        pg.draw.rect(screen, (255,255,255), pg.Rect(btn.left+8, btn.top+6, 6, btn.h-12), border_radius=2)
+        pg.draw.rect(screen, (255,255,255), pg.Rect(btn.right-14, btn.top+6, 6, btn.h-12), border_radius=2)
+    rect_map["pause"] = btn.copy()
+
+    return btn, withdraw_btn, rect_map
+
+def draw_category_menu(screen, ui_icons, active_cat, PADDING=12, BOTTOM_H=120):
+    bar = draw_panel(screen, PADDING, HEIGHT - BOTTOM_H - PADDING, WIDTH - 2*PADDING, BOTTOM_H,
+                     fill=(246, 252, 249), border=(200, 230, 215), radius=14)
+    inner = bar.inflate(-24, -24)
+    gap = 16
+    card_w = (inner.w - gap*3) // 4
+    card_h = inner.h
+    rects = []
+    for i, (label, cat_key) in enumerate(CATEGORY_MENU):
+        cx = inner.x + i*(card_w+gap); cy = inner.y
+        r = pg.Rect(cx, cy, card_w, card_h)
+        is_active = (cat_key == active_cat)
+        fill = (235, 248, 240) if is_active else (244, 250, 246)
+        border = (100, 200, 160) if is_active else (200, 230, 215)
+        draw_panel(screen, r.x, r.y, r.w, r.h, fill=fill, border=border, radius=12)
+        icon_rect = pg.Rect(r.x+14, r.y+12, 28, 28)
+        key = ["home","building","factory","services"][i]
+        draw_icon_or_fallback(screen, ui_icons, key, icon_rect, label[0])
+        draw_text(screen, label, r.x+52, r.y+14, size=22, color=(40,60,70))
+        draw_text(screen, "Clique para abrir", r.x+52, r.y+44, size=18, color=(120,150,130))
+        rects.append((r, cat_key))
+    return rects
+
+def draw_submenu(screen, ui_icons, CATALOG, cat_key, can_build_req_fn=None):
+    """
+    can_build_req_fn: função opcional que recebe (requisito:str) e retorna True/False.
+    Usada para desabilitar cards que exigem outro prédio.
+    """
+    items = SUBMENU_ITEMS.get(cat_key, [])
+    if not items: return [], {}
+    width = min(WIDTH - 24, max(380, 160*len(items)))
+    h = 110
+    x = (WIDTH - width)//2
+    y = HEIGHT - 120 - 12 - h - 10
+    panel = draw_panel(screen, x, y, width, h, fill=(255,255,255), border=(200,220,235), radius=14)
+    gap = 12
+    card_w = (width - 20 - gap*(len(items)-1)) // max(1, len(items))
+    card_h = h - 20
+    rects, disabled_map = [], {}
+    for idx, name in enumerate(items):
+        cx = x + 10 + idx*(card_w+gap); cy = y + 10
+        r = pg.Rect(cx, cy, card_w, card_h)
+        disabled = False
+        reqs = CATALOG[name].get("requires", [])
+        for rreq in reqs:
+            if can_build_req_fn and not can_build_req_fn(rreq):
+                disabled = True; break
+        fill = (246, 250, 255) if not disabled else (238, 240, 242)
+        border = (160, 200, 235) if not disabled else (190, 195, 200)
+        draw_panel(screen, r.x, r.y, r.w, r.h, fill=fill, border=border, radius=12)
+        tile = CATALOG[name]["tile"]
+        icon_rect = pg.Rect(r.x+10, r.y+10, 28, 28)
+        icon_key = UI_ITEM_ICON.get(name, tile)
+        draw_icon_or_fallback(screen, ui_icons, icon_key, icon_rect, name[0])
+        draw_text(screen, name, r.x+48, r.y+10, size=20, color=(40,60,80))
+        cost = -BUILD_EFFECTS.get(name, {}).get("money", 0)
+        draw_text(screen, f"${cost}", r.x+48, r.y+38, size=20, color=(255,165,0))
+        wh = CATALOG[name]["w"], CATALOG[name]["h"]
+        draw_text(screen, f"{wh[0]}x{wh[1]}", r.right-44, r.bottom-28, size=18, color=(120,140,160))
+        if disabled:
+            lock_rect = pg.Rect(r.right-30, r.y+10, 20, 20)
+            draw_icon_or_fallback(screen, ui_icons, "lock", lock_rect, "L")
+            disabled_map[name] = "Requer: " + ", ".join(reqs)
+        rects.append((r, name))
+    return rects, disabled_map
+
+def tooltip_text_for_key(key, state, jobs_com, jobs_ind, labor_com, labor_ind, can_withdraw_now_fn):
+    if key == "unemployment":
+        return (
+            f"Empregos comerciais: {jobs_com}\n"
+            f"Empregos fábrica: {jobs_ind}\n"
+            f"Força de trabalho disponível (comercial): {labor_com}\n"
+            f"Força de trabalho disponível (fábrica): {labor_ind}"
+        )
+    if key == "smile":
+        return (
+            "Felicidade é afetada por:\n"
+            "- Desemprego, Inflação\n"
+            "- Energia/Água insuficientes\n"
+            "- Superlotação\n"
+            "- Poluição (indústria/favela/ruas)\n"
+            "+ Parques"
+        )
+    if key in ("withdraw","treasury_bar"):
+        ok, reason = can_withdraw_now_fn()
+        return (
+            f"Acumulado: ${int(state.treasury_pending)} / ${int(state.treasury_cap)}\n"
+            f"Mínimo p/ sacar: ${int(MIN_WITHDRAW_THRESHOLD)}\n"
+            f"Status: {'Pronto para sacar' if ok else reason}"
+        )
+    return TOOLTIPS.get(key)

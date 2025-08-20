@@ -1,0 +1,20 @@
+# settings.py — constantes globais
+
+# Tela
+WIDTH, HEIGHT = 1024, 720
+FPS = 60
+
+# Grid
+GRID_SIZE = 20
+TILE = 32            # 32x32 combina com os PNGs
+MARGIN_LEFT = 16
+MARGIN_TOP = 100
+
+# Cores
+COLORS = {
+    "bg": (18, 18, 24),
+    "grid": (58, 63, 75),
+    "text": (230, 232, 238),
+    "hint": (180, 190, 200),
+    "preview": (70, 120, 200),
+}

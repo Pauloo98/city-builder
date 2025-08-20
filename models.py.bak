@@ -1,0 +1,44 @@
+# models.py
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class CityState:
+    money: int = 1500
+    happiness: float = 70.0
+    inflation: float = 4.0
+    traffic: float = 10.0
+
+    # população
+    population: int = 10
+    pop_young: int = 3
+    pop_adult: int = 6
+    pop_elder: int = 1
+
+    literacy: float = 10.0
+    unemployment: float = 0.0
+    crime: float = 5.0
+    health: float = 80.0
+
+    # recursos
+    power_cap: float = 10.0
+    water_cap: float = 10.0
+    power_use_once: float = 0.0
+    water_use_once: float = 0.0
+    power_pct: float = 100.0
+    water_pct: float = 100.0
+
+    # cofre
+    treasury_pending: float = 0.0
+    treasury_cap: float = 0.0
+
+    # acumula aqui a penalidade de poluição p/ fórmula de felicidade
+    polution_penalty: float = 0.0
+
+
+@dataclass
+class Cell:
+    btype: Optional[str] = None
+    occupied: bool = False
+    is_root: bool = False
+    group_id: Optional[str] = None

@@ -1,0 +1,1120 @@
+# main.py — City Builder socioeconômico ++ (com conectividade fixada e tooltip do saque)
+import random
+import math
+import pygame as pg
+from dataclasses import dataclass
+from time import time as now
+from typing import Optional
+
+from settings import WIDTH, HEIGHT, FPS, GRID_SIZE, TILE, MARGIN_LEFT, MARGIN_TOP, COLORS
+from events import get_random_event, Event
+from assets_loader import load_tiles, load_ui
+
+# ====================== ESTADOS ======================
+@dataclass
+class CityState:
+    money: int = 15000
+    happiness: float = 70.0      # %
+    inflation: float = 4.0       # %
+    traffic: float = 10.0        # %
+    population: int = 10
+    # coortes etárias
+    pop_young: int = 3
+    pop_adult: int = 6
+    pop_elder: int = 1
+
+    literacy: float = 10.0       # % (começa baixo sem escola)
+    unemployment: float = 0.0    # %
+    crime: float = 5.0           # % (HUD)
+    health: float = 80.0         # % (HUD)
+    pollution: float = 0.0       # índice (entra no tooltip da felicidade)
+
+    # Recursos (capacidade/uso → % no HUD)
+    power_cap: float = 10.0
+    water_cap: float = 10.0
+    power_use_once: float = 0.0   # picos temporários (ruas)
+    water_use_once: float = 0.0
+    power_pct: float = 100.0
+    water_pct: float = 100.0
+
+    # Cofre/receita
+    treasury_pending: float = 0.0
+    treasury_cap: float = 0.0
+
+@dataclass
+class Cell:
+    btype: Optional[str] = None
+    occupied: bool = False
+    is_root: bool = False
+    group_id: Optional[str] = None
+
+# ====================== CATÁLOGO ======================
+CATALOG = {
+    # Residencial
+    "Casa":         {"w":1, "h":1, "tile":"residential", "category":"Residencial"},
+    "Condomínio":   {"w":3, "h":1, "tile":"residential", "category":"Residencial"},
+    # Comercial
+    "Loja":         {"w":1, "h":1, "tile":"commercial",  "category":"Comercial"},
+    "Fazenda":      {"w":2, "h":2, "tile":"farm",        "category":"Comercial"},
+    # Industrial
+    "Fábrica":      {"w":1, "h":1, "tile":"industrial",  "category":"Industrial"},
+    "Usina":        {"w":1, "h":1, "tile":"utility",     "category":"Industrial"},    # elétrica
+    "ETA (Água)":   {"w":2, "h":2, "tile":"water_plant", "category":"Industrial"},
+    # Serviços
+    "Universidade": {"w":3, "h":2, "tile":"university",  "category":"Serviços"},
+    "Parque":       {"w":1, "h":1, "tile":"park",        "category":"Serviços"},
+    "Prefeitura":   {"w":3, "h":2, "tile":"city_hall",   "category":"Serviços"},
+    "Banco Central":{"w":3, "h":2, "tile":"central_bank","category":"Serviços", "requires":["Prefeitura"]},
+    "Delegacia":    {"w":2, "h":2, "tile":"police",      "category":"Serviços"},
+    "Hospital":     {"w":2, "h":2, "tile":"hospital",    "category":"Serviços"},
+    "Rua":          {"w":1, "h":1, "tile":"road",        "category":"Serviços"},
+    # "Favela": penalidade dinâmica (não aparece no menu)
+    "Favela":       {"w":1, "h":1, "tile":"blight",      "category":"Serviços"},
+}
+
+BUILD_EFFECTS = {
+    "Casa":          {"money": -100},
+    "Condomínio":    {"money": -280},
+    "Loja":          {"money": -200},
+    "Fazenda":       {"money": -220},
+    "Fábrica":       {"money": -300, "happiness": -2, "traffic": +2},
+    "Usina":         {"money": -350},
+    "ETA (Água)":    {"money": -380},
+    "Universidade":  {"money": -500, "happiness": +2},
+    "Parque":        {"money": -120, "happiness": +2},
+    "Prefeitura":    {"money": -800},
+    "Banco Central": {"money": -2000},
+    "Delegacia":     {"money": -450},
+    "Hospital":      {"money": -600},
+    "Rua":           {"money": -20, "traffic": +1},
+}
+
+CATEGORY_MENU = [
+    ("Residencial", "cat_res"),
+    ("Comercial",   "cat_com"),
+    ("Industrial",  "cat_ind"),
+    ("Serviços",    "cat_srv"),
+]
+
+SUBMENU_ITEMS = {
+    "cat_res": ["Casa", "Condomínio"],
+    "cat_com": ["Loja", "Fazenda"],
+    "cat_ind": ["Fábrica", "Usina", "ETA (Água)"],
+    "cat_srv": ["Prefeitura", "Banco Central", "Universidade", "Delegacia", "Hospital", "Rua", "Parque"],
+}
+
+UI_ITEM_ICON = {
+    "Casa": "casa",
+    "Condomínio": "condominio",
+    "Loja": "loja",
+    "Fazenda": "farm",
+    "Fábrica": "fabrica",
+    "Usina": "usina",
+    "ETA (Água)": "water_plant",
+    "Universidade": "services",
+    "Parque": "parque",
+    "Prefeitura": "city_hall",
+    "Banco Central": "central_bank",
+    "Delegacia": "police",
+    "Hospital": "hospital",
+    "Rua": "road",
+}
+
+# ====================== PARÂMETROS ======================
+BASE_UNIT_VALUE = 2.0
+MIN_WITHDRAW_THRESHOLD = 50.0
+WITHDRAW_COOLDOWN_S = 30
+PARTICIPATION_ADULT = 0.70
+PARTICIPATION_ELDER = 0.10
+
+JOBS_PER = {"commercial": 4, "industrial": 8, "farm": 3}
+CAP_PER = {"commercial": 200, "industrial": 300, "farm": 120}
+
+# Produção diária (capacidade) e consumo diário (uso)
+PROD_POWER_PER = {"utility": 40}               # Usina elétrica
+PROD_WATER_PER = {"water_plant": 40}           # ETA
+
+CONS_POWER_PER_DAY = {
+    "residential": 0.4, "commercial": 0.6, "industrial": 1.5, "farm": 0.4,
+    "university": 1.0, "park": 0.0, "city_hall": 0.4, "central_bank": 0.6,
+    "police": 0.6, "hospital": 1.2,
+}
+CONS_WATER_PER_DAY = {
+    "residential": 0.6, "commercial": 0.3, "industrial": 0.8, "farm": 1.2,
+    "university": 0.7, "park": 0.1, "city_hall": 0.2, "central_bank": 0.3,
+    "police": 0.3, "hospital": 1.0,
+}
+# Consumo único ao construir rua (dura ~1h de jogo)
+ROAD_ONEOFF_POWER = 0.05
+ROAD_ONEOFF_WATER = 0.05
+ONEOFF_DECAY_PER_HOUR = 0.5  # decai 50% por hora
+
+# Upkeep por minuto
+UPKEEP_PER_MIN = {
+    "road": lambda roads: (roads // 10) * 1,  # $1/min por 10 ruas
+    "central_bank": 2,
+    "university": 1,
+    "police": 1,
+    "hospital": 1,
+    "water_plant": 1,
+}
+
+TOOLTIPS = {
+    "money":      "Dinheiro.",
+    "people":     "População total.",
+    "smile":      "Felicidade geral (passe o mouse para ver fatores).",
+    "inflation":  "Inflação (impacta o saque).",
+    "literacy":   "Alfabetização (aumenta lucro de comércios/serviços).",
+    "crime":      "Criminalidade (reduz faturamento, mitigada por Delegacia).",
+    "health":     "Saúde da população (melhora com Hospital).",
+    "datetime":   "Data/horário do jogo.",
+    "bolt":       "Energia (capacidade vs consumo).",
+    "water":      "Água (capacidade vs consumo).",
+    "withdraw":   "Sacar receita acumulada (mínimo, cooldown, inflação).",
+    "auto_tax":   "Saque automático diário (−2% de eficiência).",
+    "pause":      "Pausar/Retomar.",
+}
+
+# ====================== HELPERS ======================
+def grid_to_px(x, y):
+    return (MARGIN_LEFT + x * (TILE + 2), MARGIN_TOP + y * (TILE + 2))
+
+def px_to_grid(px, py):
+    gx = (px - MARGIN_LEFT) // (TILE + 2)
+    gy = (py - MARGIN_TOP) // (TILE + 2)
+    if 0 <= gx < GRID_SIZE and 0 <= gy < GRID_SIZE:
+        return int(gx), int(gy)
+    return None
+
+def draw_text(surface, text, x, y, size=20, color=(240,240,240), center=False):
+    font = pg.font.SysFont(None, size)
+    img = font.render(str(text), True, color)
+    rect = img.get_rect()
+    if center:
+        rect.center = (x, y)
+    else:
+        rect.topleft = (x, y)
+    surface.blit(img, rect)
+
+def draw_panel(surface, x, y, w, h, fill=(245, 249, 252), border=(200, 220, 235), border_w=2, radius=12):
+    r = pg.Rect(x, y, w, h)
+    pg.draw.rect(surface, fill, r, border_radius=radius)
+    pg.draw.rect(surface, border, r, width=border_w, border_radius=radius)
+    return r
+
+# ====================== MAIN ======================
+def main():
+    pg.init()
+    screen = pg.display.set_mode((WIDTH, HEIGHT))
+    pg.display.set_caption("City Builder — vSim")
+    clock = pg.time.Clock()
+
+    tiles = load_tiles(tile_size=(TILE, TILE))
+    ui    = load_ui()
+
+    def get_tile_img(key: str):
+        return tiles.get(key, tiles.get("empty"))
+
+    # Estado
+    grid  = [[Cell() for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+    state = CityState()
+    def sync_population_scalar():
+        state.population = max(0, state.pop_young + state.pop_adult + state.pop_elder)
+
+    # Tempo
+    paused = False
+    speed  = 1.0
+    day, month, year = 1, 1, 1
+    hour, minute = 8, 0
+    sec_accum = 0.0
+    game_seconds_total = 0
+    age_clock_hours = 0
+
+    # UI seleção (2 cliques)
+    active_category: Optional[str] = None
+    selected_build: Optional[str]  = None
+    suppress_click_until_ms = 0  # ignora o clique que fecha o submenu
+
+    long_press_ms   = 600
+    mouse_down_time = None
+    painting_roads  = False
+
+    # Eventos (dilemas)
+    current_event: Optional[Event] = None
+    event_visible = False
+    def schedule_next_event(y, m, d, h):
+        add_days = random.randint(1, 3)
+        hour_t   = random.randint(7, 21)
+        y2, m2, d2 = y, m, d + add_days
+        while d2 > 30: d2 -= 30; m2 += 1
+        while m2 > 12: m2 = 1; y2 += 1
+        return (y2, m2, d2, hour_t)
+    next_event_at = schedule_next_event(year, month, day, hour)
+    def is_due(cur, target):
+        cy, cm, cd, ch = cur
+        ty, tm, td, th = target
+        return (cy>ty) or (cy==ty and (cm>tm or (cm==tm and (cd>td or (cd==td and ch>=th)))))
+
+    # Toasts
+    messages: list[dict] = []
+    def push_message(text: str, ttl: float = 2.5, color=(240, 80, 80)):
+        messages.append({"text": text, "ttl": ttl, "color": color})
+    def update_messages(dt: float):
+        for m in messages: m["ttl"] -= dt
+        while messages and messages[0]["ttl"] <= 0: messages.pop(0)
+    def draw_messages():
+        if not messages: return
+        TOPBAR_H = 100
+        PADDING  = 12
+        base_y = TOPBAR_H + PADDING + 12
+        x_center = WIDTH // 2
+        for i, m in enumerate(messages[:3]):
+            text_w = pg.font.SysFont(None, 22).size(m["text"])[0]
+            w = min(WIDTH - 160, text_w + 40)
+            h = 38
+            rx = x_center - w//2
+            ry = int(base_y + i*(h+8))
+            r = draw_panel(screen, rx, ry, w, h, fill=(255,255,255), border=(210,230,245), radius=10)
+            draw_text(screen, m["text"], r.centerx, r.centery-1, size=22, color=m["color"], center=True)
+
+    # Construção / população
+    population_by_gid: dict[str, tuple[int,int,int]] = {}  # (young,adult,elder)
+
+    def can_place(x, y, w, h):
+        if x + w > GRID_SIZE or y + h > GRID_SIZE: return False
+        for j in range(h):
+            for i in range(w):
+                if grid[y+j][x+i].occupied: return False
+        return True
+
+    def count_buildings_by_tile_connected(connected_gids: set[str], tile_key: str) -> int:
+        cnt = 0
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                c = grid[y][x]
+                if c.occupied and c.is_root and c.btype == tile_key and (c.group_id in connected_gids):
+                    cnt += 1
+        return cnt
+
+    def count_all(tile_key: str) -> int:
+        cnt = 0
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                c = grid[y][x]
+                if c.occupied and c.is_root and c.btype == tile_key:
+                    cnt += 1
+        return cnt
+
+    def has_building(name: str) -> bool:
+        tile = CATALOG[name]["tile"]
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                c = grid[y][x]
+                if c.occupied and c.is_root and c.btype == tile:
+                    return True
+        return False
+
+    def apply_effects_money(name: str) -> bool:
+        eff = BUILD_EFFECTS.get(name, {})
+        need = -eff.get("money", 0)
+        if need and state.money < need: return False
+        state.money += eff.get("money", 0)
+        state.happiness = max(0, min(100, state.happiness + eff.get("happiness", 0)))
+        state.traffic   = max(0, min(100, state.traffic   + eff.get("traffic", 0)))
+        return True
+
+    def add_population_random(gid: str, name: str):
+        if name == "Casa":
+            total = random.randint(1, 6)
+        elif name == "Condomínio":
+            total = random.randint(7, 15)
+        else:
+            return
+        young = int(round(total * random.uniform(0.25, 0.40)))
+        elder = int(round(total * random.uniform(0.08, 0.15)))
+        adult = max(0, total - young - elder)
+        state.pop_young += young; state.pop_adult += adult; state.pop_elder += elder
+        sync_population_scalar()
+        population_by_gid[gid] = (young, adult, elder)
+
+    def remove_population_gid(gid: str):
+        tup = population_by_gid.pop(gid, None)
+        if not tup: return
+        y,a,e = tup
+        state.pop_young = max(0, state.pop_young - y)
+        state.pop_adult = max(0, state.pop_adult - a)
+        state.pop_elder = max(0, state.pop_elder - e)
+        sync_population_scalar()
+
+    def place_build(x, y, name: str):
+        # requisitos
+        reqs = CATALOG.get(name, {}).get("requires", [])
+        for r in reqs:
+            if not has_building(r):
+                return False, f"Requer {r}."
+        cfg = CATALOG[name]
+        w, h, tile = cfg["w"], cfg["h"], cfg["tile"]
+        if not can_place(x, y, w, h): return False, "Área ocupada/insuficiente."
+        # custo
+        if not apply_effects_money(name): return False, "Dinheiro insuficiente."
+        # gravar grid
+        gid = f"{int(now()*1000)}"
+        grid[y][x] = Cell(tile, True, True, gid)
+        for j in range(h):
+            for i in range(w):
+                if i==0 and j==0: continue
+                grid[y+j][x+i] = Cell(tile, True, False, gid)
+        # residências → população aleatória
+        if name in ("Casa","Condomínio"):
+            add_population_random(gid, name)
+        # rua → pico de consumo (decai com o tempo)
+        if name == "Rua":
+            state.power_use_once += ROAD_ONEOFF_POWER
+            state.water_use_once += ROAD_ONEOFF_WATER
+        # recomputes
+        recompute_connectivity()
+        refresh_treasury_cap()
+        return True, None
+
+    def demolish_at(x, y):
+        c0 = grid[y][x]
+        if not c0.occupied: return
+        gid = c0.group_id
+        if gid: remove_population_gid(gid)
+        for yy in range(GRID_SIZE):
+            for xx in range(GRID_SIZE):
+                if grid[yy][xx].group_id == gid:
+                    grid[yy][xx] = Cell()
+        recompute_connectivity()
+        refresh_treasury_cap()
+
+    # Conectividade via Prefeitura
+    connected_roads: set[tuple[int,int]] = set()
+    connected_gids: set[str] = set()
+    show_conn_overlay = False
+
+    def neighbors4(x, y):
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
+                yield nx, ny
+
+    def recompute_connectivity():
+        connected_roads.clear()
+        connected_gids.clear()
+        # 1) achar prefeituras
+        halls = [(x,y) for y in range(GRID_SIZE) for x in range(GRID_SIZE)
+                 if grid[y][x].occupied and grid[y][x].btype == "city_hall"]
+        if not halls: return
+        # 2) ruas adjacentes a prefeituras = sementes
+        seeds = []
+        for (cx, cy) in halls:
+            for nx, ny in neighbors4(cx, cy):
+                if grid[ny][nx].occupied and grid[ny][nx].btype == "road":
+                    seeds.append((nx, ny))
+        # 3) BFS nas ruas
+        stack = list(seeds)
+        seen = set(stack)
+        while stack:
+            x, y = stack.pop()
+            connected_roads.add((x, y))
+            for nx, ny in neighbors4(x, y):
+                if (nx, ny) in seen: continue
+                if grid[ny][nx].occupied and grid[ny][nx].btype == "road":
+                    seen.add((nx, ny)); stack.append((nx, ny))
+        # 4) grupo conectado se QUALQUER tile do grupo encostar numa rua conectada
+        road_set = connected_roads
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                c = grid[y][x]
+                if not (c.occupied and c.btype != "road"):
+                    continue
+                gid = c.group_id
+                if not gid:
+                    continue
+                for nx, ny in neighbors4(x, y):
+                    if (nx, ny) in road_set:
+                        connected_gids.add(gid)
+                        break
+
+    # Mercado de trabalho
+    jobs_com = jobs_ind = jobs_farm = 0
+    labor_total = labor_com = labor_ind = labor_farm = 0
+
+    def central_bank_connected() -> bool:
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                c = grid[y][x]
+                if c.occupied and c.is_root and c.btype == "central_bank" and c.group_id in connected_gids:
+                    return True
+        return False
+
+    def refresh_treasury_cap():
+        com  = count_buildings_by_tile_connected(connected_gids, "commercial")
+        ind  = count_buildings_by_tile_connected(connected_gids, "industrial")
+        farm = count_buildings_by_tile_connected(connected_gids, "farm")
+        base_cap = CAP_PER["commercial"]*com + CAP_PER["industrial"]*ind + CAP_PER["farm"]*farm
+        if central_bank_connected(): base_cap *= 1.5
+        state.treasury_cap = float(base_cap)
+
+    def update_labor_market():
+        nonlocal jobs_com, jobs_ind, jobs_farm, labor_total, labor_com, labor_ind, labor_farm
+        com  = count_buildings_by_tile_connected(connected_gids, "commercial")
+        ind  = count_buildings_by_tile_connected(connected_gids, "industrial")
+        farm = count_buildings_by_tile_connected(connected_gids, "farm")
+        jobs_com  = JOBS_PER["commercial"] * com
+        jobs_ind  = JOBS_PER["industrial"] * ind
+        jobs_farm = JOBS_PER["farm"] * farm
+
+        labor_total = int(round(
+            state.pop_adult * PARTICIPATION_ADULT + state.pop_elder * PARTICIPATION_ELDER
+        ))
+        total_jobs = jobs_com + jobs_ind + jobs_farm
+        if total_jobs <= 0 or labor_total <= 0:
+            labor_com = labor_ind = labor_farm = 0
+            state.unemployment = 100.0 if labor_total > 0 else 0.0
+            return
+        labor_com  = int(round(labor_total * (jobs_com  / total_jobs)))
+        labor_ind  = int(round(labor_total * (jobs_ind  / total_jobs)))
+        labor_farm = labor_total - labor_com - labor_ind
+        emp = min(labor_com, jobs_com) + min(labor_ind, jobs_ind) + min(labor_farm, jobs_farm)
+        state.unemployment = max(0.0, 1.0 - (emp / max(1, labor_total))) * 100.0
+
+    # Recursos: capacidade/consumo → percentuais
+    def recompute_resources():
+        # capacidade
+        usinas = count_buildings_by_tile_connected(connected_gids, "utility")
+        etas   = count_buildings_by_tile_connected(connected_gids, "water_plant")
+        state.power_cap = 10.0 + usinas * PROD_POWER_PER["utility"]
+        state.water_cap = 10.0 + etas   * PROD_WATER_PER["water_plant"]
+
+        def count_by_tile(tile):
+            return sum(1 for y in range(GRID_SIZE) for x in range(GRID_SIZE)
+                       if grid[y][x].occupied and grid[y][x].is_root and grid[y][x].btype == tile)
+
+        counts = {
+            "residential": count_by_tile("residential"),
+            "commercial":  count_by_tile("commercial"),
+            "industrial":  count_by_tile("industrial"),
+            "farm":        count_by_tile("farm"),
+            "university":  count_by_tile("university"),
+            "park":        count_by_tile("park"),
+            "city_hall":   count_by_tile("city_hall"),
+            "central_bank":count_by_tile("central_bank"),
+            "police":      count_by_tile("police"),
+            "hospital":    count_by_tile("hospital"),
+        }
+
+        power_use_day = sum(CONS_POWER_PER_DAY.get(k,0)*v for k,v in counts.items())
+        water_use_day = sum(CONS_WATER_PER_DAY.get(k,0)*v for k,v in counts.items())
+
+        power_use_inst = power_use_day + state.power_use_once
+        water_use_inst = water_use_day + state.water_use_once
+
+        state.power_pct = max(0.0, min(100.0, (state.power_cap - power_use_inst) / max(1.0, state.power_cap) * 100.0))
+        state.water_pct = max(0.0, min(100.0, (state.water_cap - water_use_inst) / max(1.0, state.water_cap) * 100.0))
+
+    # Felicidade diária
+    def update_happiness_daily():
+        target = GRID_SIZE*GRID_SIZE*0.6
+        dens = state.population / max(1.0, target)
+        superlot = max(0.0, (dens - 1.0)) * 1.0
+        serv_pen = (max(0, 60 - state.power_pct)/60.0 + max(0, 60 - state.water_pct)/60.0) * 1.0
+        pen_un = max(0.0, (state.unemployment - 5)/5.0) * 1.5
+        pen_inf = max(0.0, (state.inflation - 6)/4.0) * 1.0
+        pol_pen = getattr(state, "polution_penalty", 0.0)
+        parks = count_buildings_by_tile_connected(connected_gids, "park")
+        bonus_park = min(2.0, 0.2 * parks)
+        delta = - (pen_un + pen_inf + serv_pen + superlot + pol_pen) + bonus_park
+        state.happiness = max(0.0, min(100.0, state.happiness + delta))
+
+    # Poluição / crime / saúde por hora
+    def socio_env_hourly():
+        roads = count_all("road")
+        inds  = count_all("industrial")
+        blgts = count_all("blight")
+        parks = count_all("park")
+        state.polution_penalty = max(0.0, (inds*3 + blgts*2 + roads*0.05 - parks*0.5) / 20.0)
+
+        police = count_buildings_by_tile_connected(connected_gids, "police")
+        base_crime = 5.0 + 0.5*state.unemployment + blgts*3.0 - police*8.0
+        state.crime = max(0.0, min(100.0, 0.7*state.crime + 0.3*max(0.0, base_crime) + random.uniform(-1,1)))
+
+        hospitals = count_buildings_by_tile_connected(connected_gids, "hospital")
+        health_base = 70 + hospitals*4 - state.polution_penalty*8 - (100-state.power_pct)/10 - (100-state.water_pct)/10
+        state.health = max(0.0, min(100.0, 0.7*state.health + 0.3*health_base))
+
+    # Receita por segundo
+    def income_tick_per_second():
+        update_labor_market()
+        com  = count_buildings_by_tile_connected(connected_gids, "commercial")
+        ind  = count_buildings_by_tile_connected(connected_gids, "industrial")
+        farm = count_buildings_by_tile_connected(connected_gids, "farm")
+        if (com + ind + farm) == 0: return
+
+        demand_units = state.population // 5
+        supply_units = com + 2*ind + 1*farm
+        served = min(demand_units, supply_units)
+        if served <= 0: return
+
+        traffic_penalty = max(0.7, 1 - state.traffic/200.0)
+        crime_penalty   = max(0.7, 1 - state.crime/150.0)
+        health_bonus    = 0.9 + 0.1*(state.health/100.0)
+
+        eff_base = (0.6 + 0.4 * state.happiness/100.0) \
+                 * (0.5 + 0.5 * state.power_pct/100.0) \
+                 * (0.5 + 0.5 * state.water_pct/100.0) \
+                 * traffic_penalty * crime_penalty * health_bonus
+
+        denom = max(0.0003, (com + 2*ind + 1*farm) + 0.0003)
+        share_com  = (com   + 0.0001) / denom
+        share_ind  = (2*ind + 0.0001) / denom
+        share_farm = (1*farm+ 0.0001) / denom
+
+        f_lit  = 0.6 + 0.4*(state.literacy/100.0)
+        f_ind  = 0.85 + 0.15*(state.literacy/100.0)
+        f_farm = 0.7
+
+        rate_per_min = served * BASE_UNIT_VALUE * eff_base * (share_com*f_lit + share_ind*f_ind + share_farm*f_farm)
+        state.treasury_pending = min(state.treasury_cap, state.treasury_pending + rate_per_min/60.0)
+
+    # Inflação por oferta/demanda (por hora)
+    def inflation_hourly():
+        com  = count_buildings_by_tile_connected(connected_gids, "commercial")
+        ind  = count_buildings_by_tile_connected(connected_gids, "industrial")
+        farm = count_buildings_by_tile_connected(connected_gids, "farm")
+        demand_index = state.population // 5
+        supply_index = com + 2*ind + 1*farm
+        gap = demand_index - supply_index
+        a = 1.2
+        b = 0.8 if central_bank_connected() else 0.0
+        g = 0.2 * (farm/6.0)
+        noise = random.uniform(-0.1, 0.1) + (random.uniform(-0.1,0.1) if farm>0 else 0.0)
+        delta = a*math.tanh(gap/10.0) - b - g + noise
+        state.inflation = max(0.0, min(40.0, state.inflation + delta))
+
+    # Upkeep por minuto
+    def upkeep_minutely():
+        roads = count_all("road")
+        drain = 0
+        drain += UPKEEP_PER_MIN["road"](roads)
+        if count_all("central_bank"): drain += UPKEEP_PER_MIN["central_bank"]
+        if count_all("university"):   drain += UPKEEP_PER_MIN["university"]
+        if count_all("police"):       drain += UPKEEP_PER_MIN["police"]
+        if count_all("hospital"):     drain += UPKEEP_PER_MIN["hospital"]
+        if count_all("water_plant"):  drain += UPKEEP_PER_MIN["water_plant"]
+        if drain:
+            state.money = max(0, state.money - drain)
+
+    last_withdraw_game_s = -9999
+    auto_tax = False  # toggle no HUD
+
+    # ====================== UI ======================
+    TOPBAR_H = 100
+    BOTTOM_H = 120
+    PADDING  = 12
+
+    def draw_icon_or_fallback(surf, icon_key, dst_rect, label=None):
+        icon = ui.get(icon_key) if isinstance(ui, dict) else None
+        if icon:
+            icon_scaled = pg.transform.smoothscale(icon, (dst_rect.w, dst_rect.h))
+            surf.blit(icon_scaled, dst_rect.topleft)
+        else:
+            pg.draw.ellipse(surf, (255,255,255), dst_rect)
+            if label:
+                draw_text(surf, label, dst_rect.centerx, dst_rect.centery-9, size=18, color=(40,60,90), center=True)
+
+    TOOLTIP_DELAY_MS = 300
+    hover_key = None
+    hover_start_ms = 0
+    def begin_hover(key):
+        nonlocal hover_key, hover_start_ms
+        if hover_key != key:
+            hover_key = key; hover_start_ms = pg.time.get_ticks()
+    def clear_hover():
+        nonlocal hover_key, hover_start_ms
+        hover_key = None; hover_start_ms = 0
+
+    def draw_tooltip(text, pos):
+        lines = text.split("\n")
+        font_tip = pg.font.SysFont(None, 20)
+        tw = max(font_tip.size(line)[0] for line in lines)
+        th = sum(font_tip.size(line)[1] for line in lines) + (len(lines)-1)*4
+        pad_x, pad_y = 10, 8
+        w = tw + pad_x*2; h = th + pad_y*2
+        mx, my = pos
+        x = min(max(8, mx + 16), WIDTH - w - 8)
+        y = min(max(8, my - h - 16), HEIGHT - h - 8)
+        shadow = pg.Surface((w, h), pg.SRCALPHA)
+        pg.draw.rect(shadow, (0,0,0,70), shadow.get_rect(), border_radius=10)
+        screen.blit(shadow, (x+2, y+2))
+        r = draw_panel(screen, x, y, w, h, fill=(255,255,255), border=(210,230,245), radius=10)
+        cy = r.y + pad_y - 1
+        for line in lines:
+            draw_text(screen, line, r.x + pad_x, cy, size=20, color=(40,60,90))
+            cy += font_tip.size(line)[1] + 4
+
+    def draw_topbar():
+        bar = draw_panel(screen, PADDING, PADDING, WIDTH - 2*PADDING, TOPBAR_H,
+                         fill=(250, 253, 255), border=(210, 230, 245), radius=14)
+        rect_map = {}
+
+        x = bar.left + 16; y = bar.top + 12
+
+        # Dinheiro
+        ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, "money", ico, "$")
+        money_text = f"${int(state.money)}"; draw_text(screen, money_text, x+28, y-2, size=22, color=(255,205,0))
+        rect_map["money"] = pg.Rect(ico.x, ico.y-2, 28 + pg.font.SysFont(None,22).size(money_text)[0], 28)
+
+        # SACAR + barra (lado esquerdo, longe do pausa)
+        withdraw_btn = pg.Rect(bar.left + 12, bar.top+58, 120, 30)
+        can_withdraw, _ = can_withdraw_now()
+        pg.draw.rect(screen, (0,170,120) if can_withdraw else (150,160,170), withdraw_btn, border_radius=8)
+        draw_text(screen, "Sacar", withdraw_btn.centerx, withdraw_btn.centery, size=18, color=(255,255,255), center=True)
+        rect_map["withdraw"] = withdraw_btn.copy()
+
+        cap = max(1.0, state.treasury_cap)
+        ratio = max(0.0, min(1.0, state.treasury_pending/cap))
+        prog = pg.Rect(withdraw_btn.right + 8, withdraw_btn.y, 140, 30)
+        pg.draw.rect(screen, (230,236,244), prog, border_radius=8)
+        pg.draw.rect(screen, (90,180,140), pg.Rect(prog.x, prog.y, int(prog.w*ratio), prog.h), border_radius=8)
+        rect_map["treasury_bar"] = prog.copy()  # para tooltip do cofre
+
+        # Auto-saque toggle
+        auto_btn = pg.Rect(prog.right + 8, prog.y, 30, 30)
+        pg.draw.rect(screen, (60,180,220) if auto_tax else (200,210,220), auto_btn, border_radius=6)
+        draw_text(screen, "A", auto_btn.centerx, auto_btn.centery, size=20, color=(255,255,255), center=True)
+        rect_map["auto_tax"] = auto_btn.copy()
+
+        # Pop, Felicidade, Inflação, Alfabetização
+        x += 140
+        ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, "people", ico, "P")
+        draw_text(screen, f"{state.population}", x+28, y-2, size=22, color=(140,190,255))
+        rect_map["people"] = pg.Rect(ico.x, ico.y-2, 80, 26)
+
+        x += 90
+        ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, "smile", ico, ":)")
+        draw_text(screen, f"{int(state.happiness)}%", x+28, y-2, size=22, color=(80,200,120))
+        rect_map["smile"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+        x += 90
+        ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, "percent", ico, "%")
+        draw_text(screen, f"{int(state.inflation)}%", x+28, y-2, size=22, color=(120,140,180))
+        rect_map["inflation"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+        x += 100
+        ico = pg.Rect(x, y, 20, 20); draw_icon_or_fallback(screen, "services", ico, "A")
+        draw_text(screen, f"{int(state.literacy)}% ALF", x+28, y-2, size=22, color=(90,150,230))
+        rect_map["literacy"] = pg.Rect(ico.x, ico.y-2, 130, 26)
+
+        # Linha 2
+        y2 = bar.top + 60
+        ico = pg.Rect(bar.left + 320, y2, 18, 18); draw_icon_or_fallback(screen, "lock", ico, "U")
+        draw_text(screen, f"Desemprego: {int(round(state.unemployment))}%", ico.right+6, y2-2, size=18, color=(180,110,120))
+        rect_map["unemployment"] = pg.Rect(ico.x, ico.y-2, 210, 24)
+
+        ico = pg.Rect(bar.left + 530, y2, 18, 18); draw_icon_or_fallback(screen, "crime", ico, "C")
+        draw_text(screen, f"Crime: {int(round(state.crime))}%", ico.right+6, y2-2, size=18, color=(200,100,120))
+        rect_map["crime"] = pg.Rect(ico.x, ico.y-2, 160, 24)
+
+        ico = pg.Rect(bar.left + 690, y2, 18, 18); draw_icon_or_fallback(screen, "health", ico, "+")
+        draw_text(screen, f"Saúde: {int(round(state.health))}%", ico.right+6, y2-2, size=18, color=(120,180,140))
+        rect_map["health"] = pg.Rect(ico.x, ico.y-2, 160, 24)
+
+        # Tempo
+        time_text = f"{day:02d}/{month:02d}/{year:02d}  {hour:02d}:{minute:02d}"
+        draw_text(screen, time_text, bar.centerx-60, y-2, size=20, color=(60,90,120))
+        tw = pg.font.SysFont(None,20).size(time_text)[0]
+        rect_map["datetime"] = pg.Rect(bar.centerx-60, y-2, tw, 26)
+
+        # Energia/Água
+        rx = bar.right - 360
+        ico = pg.Rect(rx, y, 20, 20); draw_icon_or_fallback(screen, "bolt",  ico, "⚡")
+        draw_text(screen, f"{int(state.power_pct)}%", rx+28, y-2, size=20, color=(255,190,0))
+        rect_map["bolt"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+        rx += 90
+        ico = pg.Rect(rx, y, 20, 20); draw_icon_or_fallback(screen, "water", ico, "W")
+        draw_text(screen, f"{int(state.water_pct)}%", rx+28, y-2, size=20, color=(120,200,255))
+        rect_map["water"] = pg.Rect(ico.x, ico.y-2, 90, 26)
+
+        # Botão pausa (sempre no canto direito)
+        btn = pg.Rect(bar.right-44, bar.top+10, 32, 32)
+        pg.draw.rect(screen, (0, 170, 120) if not paused else (0, 130, 180), btn, border_radius=8)
+        if paused:
+            pg.draw.polygon(screen, (255,255,255), [(btn.left+10, btn.top+6), (btn.left+10, btn.bottom-6), (btn.right-8, btn.centery)])
+        else:
+            pg.draw.rect(screen, (255,255,255), pg.Rect(btn.left+8, btn.top+6, 6, btn.h-12), border_radius=2)
+            pg.draw.rect(screen, (255,255,255), pg.Rect(btn.right-14, btn.top+6, 6, btn.h-12), border_radius=2)
+        rect_map["pause"] = btn.copy()
+
+        return btn, withdraw_btn, rect_map
+
+    # Rodapé
+    def draw_category_menu(active_cat: Optional[str]):
+        bar = draw_panel(screen, PADDING, HEIGHT - BOTTOM_H - PADDING, WIDTH - 2*PADDING, BOTTOM_H,
+                         fill=(246, 252, 249), border=(200, 230, 215), radius=14)
+        inner = bar.inflate(-24, -24)
+        gap = 16
+        card_w = (inner.w - gap*3) // 4
+        card_h = inner.h
+        rects = []
+        for i, (label, cat_key) in enumerate(CATEGORY_MENU):
+            cx = inner.x + i*(card_w+gap); cy = inner.y
+            r = pg.Rect(cx, cy, card_w, card_h)
+            is_active = (cat_key == active_cat)
+            fill = (235, 248, 240) if is_active else (244, 250, 246)
+            border = (100, 200, 160) if is_active else (200, 230, 215)
+            draw_panel(screen, r.x, r.y, r.w, r.h, fill=fill, border=border, radius=12)
+            icon_rect = pg.Rect(r.x+14, r.y+12, 28, 28)
+            key = ["home","building","factory","services"][i]
+            draw_icon_or_fallback(screen, key, icon_rect, label[0])
+            draw_text(screen, label, r.x+52, r.y+14, size=22, color=(40,60,70))
+            draw_text(screen, "Clique para abrir", r.x+52, r.y+44, size=18, color=(120,150,130))
+            rects.append((r, cat_key))
+        return rects
+
+    def draw_submenu(cat_key: str):
+        items = SUBMENU_ITEMS.get(cat_key, [])
+        if not items: return [], {}
+        width = min(WIDTH - 2*PADDING, max(380, 160*len(items)))
+        h = 110
+        x = (WIDTH - width)//2
+        y = HEIGHT - BOTTOM_H - PADDING - h - 10
+        panel = draw_panel(screen, x, y, width, h, fill=(255,255,255), border=(200,220,235), radius=14)
+        gap = 12
+        card_w = (width - 20 - gap*(len(items)-1)) // max(1, len(items))
+        card_h = h - 20
+        rects, disabled_map = [], {}
+        for idx, name in enumerate(items):
+            cx = x + 10 + idx*(card_w+gap); cy = y + 10
+            r = pg.Rect(cx, cy, card_w, card_h)
+            disabled = False
+            reqs = CATALOG[name].get("requires", [])
+            for rreq in reqs:
+                if not has_building(rreq): disabled = True; break
+            fill = (246, 250, 255) if not disabled else (238, 240, 242)
+            border = (160, 200, 235) if not disabled else (190, 195, 200)
+            draw_panel(screen, r.x, r.y, r.w, r.h, fill=fill, border=border, radius=12)
+            tile = CATALOG[name]["tile"]
+            icon_rect = pg.Rect(r.x+10, r.y+10, 28, 28)
+            icon_key = UI_ITEM_ICON.get(name, tile)
+            draw_icon_or_fallback(screen, icon_key, icon_rect, name[0])
+            draw_text(screen, name, r.x+48, r.y+10, size=20, color=(40,60,80))
+            cost = -BUILD_EFFECTS.get(name, {}).get("money", 0)
+            draw_text(screen, f"${cost}", r.x+48, r.y+38, size=20, color=(255,165,0))
+            wh = CATALOG[name]["w"], CATALOG[name]["h"]
+            draw_text(screen, f"{wh[0]}x{wh[1]}", r.right-44, r.bottom-28, size=18, color=(120,140,160))
+            if disabled:
+                lock_rect = pg.Rect(r.right-30, r.y+10, 20, 20)
+                draw_icon_or_fallback(screen, "lock", lock_rect, "L")
+                disabled_map[name] = "Requer: " + ", ".join(reqs)
+            rects.append((r, name))
+        return rects, disabled_map
+
+    # Saque
+    def can_withdraw_now():
+        nonlocal last_withdraw_game_s
+        com  = count_buildings_by_tile_connected(connected_gids, "commercial")
+        ind  = count_buildings_by_tile_connected(connected_gids, "industrial")
+        farm = count_buildings_by_tile_connected(connected_gids, "farm")
+        if (com + ind + farm) == 0:
+            return False, "É preciso ao menos 1 Comércio/Indústria/Fazenda conectados à Prefeitura."
+        if state.treasury_pending < MIN_WITHDRAW_THRESHOLD:
+            return False, f"Sem riqueza suficiente (mínimo ${int(MIN_WITHDRAW_THRESHOLD)})."
+        cd = WITHDRAW_COOLDOWN_S - (10 if central_bank_connected() else 0)
+        cd = max(10, cd)
+        if (game_seconds_total - last_withdraw_game_s) < cd:
+            return False, f"Aguarde cooldown ({int(cd - (game_seconds_total - last_withdraw_game_s))}s)."
+        return True, None
+
+    def perform_withdraw(auto=False):
+        nonlocal last_withdraw_game_s
+        payout = state.treasury_pending
+        payout *= max(0.0, 1.0 - state.inflation/100.0)
+        if auto:
+            payout *= 0.98  # perda de eficiência no auto
+        add = int(payout)
+        state.money += add
+        push_message(f"Receita coletada: ${add}" + (" (auto)" if auto else ""), ttl=2.5, color=(40,140,90))
+        state.treasury_pending = 0.0
+        last_withdraw_game_s = game_seconds_total
+
+    # ====================== LOOP ======================
+    running = True
+    pause_btn_rect = None
+    withdraw_btn_rect = None
+    auto_btn_rect = None
+    cat_rects = []
+    submenu_rects = []
+    submenu_disabled_map = {}
+
+    overlay_key_toggle = pg.K_r
+
+    recompute_connectivity()
+    refresh_treasury_cap()
+    update_labor_market()
+    recompute_resources()
+
+    while running:
+        dt_real = clock.tick(FPS) / 1000.0
+
+        for e in pg.event.get():
+            if e.type == pg.QUIT:
+                running = False
+            elif e.type == pg.KEYDOWN:
+                if e.key == pg.K_ESCAPE:
+                    if active_category is not None:
+                        active_category = None
+                        suppress_click_until_ms = pg.time.get_ticks() + 200
+                    else:
+                        running = False
+                elif e.key == pg.K_SPACE:
+                    paused = not paused
+                elif e.key == pg.K_F1: speed = 1.0
+                elif e.key == pg.K_F2: speed = 2.0
+                elif e.key == pg.K_F3: speed = 5.0
+                elif e.key == overlay_key_toggle:
+                    show_conn_overlay = not show_conn_overlay
+                    push_message("Overlay de conectividade: " + ("ON" if show_conn_overlay else "OFF"), ttl=1.5, color=(90,120,200))
+            elif e.type == pg.MOUSEBUTTONDOWN and e.button == 1:
+                mouse_down_time = pg.time.get_ticks()
+                mx, my = pg.mouse.get_pos()
+                # categorias
+                for r, cat_key in cat_rects:
+                    if r.collidepoint(mx, my):
+                        active_category = cat_key if active_category != cat_key else None
+                        if active_category is None:
+                            suppress_click_until_ms = pg.time.get_ticks() + 200
+                        break
+                # submenu
+                if active_category and submenu_rects:
+                    clicked = False
+                    for r, name in submenu_rects:
+                        if r.collidepoint(mx, my):
+                            if name in submenu_disabled_map:
+                                push_message(submenu_disabled_map[name], ttl=2.5, color=(200,100,80))
+                            else:
+                                selected_build = name
+                                active_category = None
+                                suppress_click_until_ms = pg.time.get_ticks() + 200
+                            clicked = True
+                            break
+                    if clicked: continue
+                # botões topo
+                if pause_btn_rect and pause_btn_rect.collidepoint(mx, my):
+                    paused = not paused; continue
+                if withdraw_btn_rect and withdraw_btn_rect.collidepoint(mx, my):
+                    ok, reason = can_withdraw_now()
+                    if ok: perform_withdraw()
+                    else:  push_message(reason, ttl=2.5, color=(220, 80, 80))
+                    continue
+                if auto_btn_rect and auto_btn_rect.collidepoint(mx, my):
+                    auto_tax = not auto_tax
+                    push_message("Auto-saque " + ("ON" if auto_tax else "OFF"), ttl=1.5, color=(80,140,200))
+                    continue
+                # pintar ruas por arrasto
+                if selected_build == "Rua":
+                    painting_roads = True
+            elif e.type == pg.MOUSEBUTTONUP and e.button == 1:
+                held = pg.time.get_ticks() - (mouse_down_time or pg.time.get_ticks())
+                mouse_down_time = None
+                painting_roads = False
+                mx, my = pg.mouse.get_pos()
+                gpos = px_to_grid(mx, my)
+                if not gpos: continue
+                if pg.time.get_ticks() < suppress_click_until_ms:
+                    continue  # exige segundo clique após seleção
+                gx, gy = gpos
+                if event_visible and current_event: continue
+                if held > long_press_ms and grid[gy][gx].occupied:
+                    demolish_at(gx, gy); recompute_resources(); continue
+                if not selected_build:
+                    push_message("Escolha uma construção no menu.", ttl=1.8, color=(200,140,60))
+                else:
+                    ok, msg = place_build(gx, gy, selected_build)
+                    if not ok and msg:
+                        push_message(msg, ttl=2.5, color=(220, 80, 80))
+                    else:
+                        recompute_resources()
+            elif e.type == pg.MOUSEMOTION and painting_roads and selected_build == "Rua":
+                mx, my = e.pos
+                gpos = px_to_grid(mx, my)
+                if gpos:
+                    gx, gy = gpos
+                    c = grid[gy][gx]
+                    if not c.occupied:
+                        ok, msg = place_build(gx, gy, "Rua")
+                        if not ok and msg:
+                            if "Dinheiro insuficiente" in msg:
+                                push_message(msg, ttl=2.0, color=(220, 80, 80))
+                                painting_roads = False
+                        else:
+                            recompute_resources()
+
+        # Tempo do jogo
+        if not paused:
+            sec_accum += dt_real * speed
+            while sec_accum >= 1.0:
+                sec_accum -= 1.0
+                game_seconds_total += 1
+
+                # receita/seg
+                income_tick_per_second()
+
+                # avança relógio
+                minute += 1
+                if minute >= 60:
+                    minute = 0
+                    hour += 1
+                    # decaimento dos picos de construção
+                    state.power_use_once *= (1.0 - ONEOFF_DECAY_PER_HOUR/24.0)
+                    state.water_use_once *= (1.0 - ONEOFF_DECAY_PER_HOUR/24.0)
+                    # recursos reavaliados periodicamente
+                    recompute_resources()
+                    # inflação / crime / saúde / poluição
+                    inflation_hourly()
+                    socio_env_hourly()
+                    if hour >= 24:
+                        hour = 0
+                        day += 1
+                        # aging anual simples
+                        if day == 1 and month == 1:
+                            y2a = round(state.pop_young * 0.20)
+                            a2e = round(state.pop_adult * 0.04)
+                            e2out = round(state.pop_elder * 0.06)
+                            state.pop_young = max(0, state.pop_young - y2a)
+                            state.pop_adult = max(0, state.pop_adult + y2a - a2e)
+                            state.pop_elder = max(0, state.pop_elder + a2e - e2out)
+                            sync_population_scalar()
+                        # auto-saque diário
+                        if auto_tax:
+                            ok,_ = can_withdraw_now()
+                            if ok: perform_withdraw(auto=True)
+                        # felicidade diária
+                        update_happiness_daily()
+
+                        if day > 30:
+                            day = 1; month += 1
+                            if month > 12: month = 1; year += 1
+
+                # alfabetização: +0.2 pt/h com universidade conectada
+                unis = count_buildings_by_tile_connected(connected_gids, "university")
+                if unis > 0:
+                    state.literacy = min(100.0, state.literacy + (0.2/60.0))
+
+                # upkeep por minuto
+                upkeep_minutely()
+
+        update_messages(dt_real)
+
+        # ===== DRAW =====
+        screen.fill(COLORS["bg"])
+
+        # Top bar
+        pause_btn_rect, withdraw_btn_rect, top_rect_map = draw_topbar()
+        auto_btn_rect = top_rect_map.get("auto_tax")
+
+        # Grid
+        mx, my = pg.mouse.get_pos()
+        hover = px_to_grid(mx, my)
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                px, py = grid_to_px(x, y)
+                cell = grid[y][x]
+                key = cell.btype if cell.occupied else "empty"
+                img = get_tile_img(key)
+                if img: screen.blit(img, (px, py))
+                pg.draw.rect(screen, COLORS["grid"], pg.Rect(px, py, TILE, TILE), width=1, border_radius=4)
+
+        # Overlay conectividade
+        if show_conn_overlay:
+            for (x,y) in connected_roads:
+                px, py = grid_to_px(x, y)
+                pg.draw.rect(screen, (90,200,120), pg.Rect(px+4, py+4, TILE-8, TILE-8), width=2, border_radius=6)
+            for y in range(GRID_SIZE):
+                for x in range(GRID_SIZE):
+                    c = grid[y][x]
+                    if c.occupied and c.is_root and c.btype not in ("road",):
+                        px, py = grid_to_px(x, y)
+                        col = (90,200,120) if (c.group_id in connected_gids) else (220,80,80)
+                        pg.draw.rect(screen, col, pg.Rect(px+2, py+2, TILE-4, TILE-4), width=2, border_radius=6)
+
+        # Preview footprint
+        if hover and (not event_visible) and selected_build:
+            hx, hy = hover
+            cfg = CATALOG[selected_build]
+            for j in range(cfg["h"]):
+                for i in range(cfg["w"]):
+                    x = hx + i; y = hy + j
+                    if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
+                        px, py = grid_to_px(x, y)
+                        pg.draw.rect(screen, COLORS["preview"], pg.Rect(px, py, TILE, TILE), width=2, border_radius=4)
+
+        # Rodapé + submenu
+        cat_rects = draw_category_menu(active_category)
+        submenu_rects, submenu_disabled_map = ([], {})
+        if active_category:
+            submenu_rects, submenu_disabled_map = draw_submenu(active_category)
+
+        # Eventos (modal)
+        if event_visible and current_event:
+            panel = draw_panel(screen, WIDTH//2 - 320, HEIGHT//2 - 160, 640, 320)
+            draw_text(screen, "DILEMA", panel.centerx, panel.top + 22, size=28, color=(30,60,100), center=True)
+            draw_text(screen, current_event.title, panel.left + 24, panel.top + 58, size=22, color=(30,50,70))
+            desc = current_event.desc
+            draw_text(screen, desc, panel.left + 24, panel.top + 88, size=20, color=(40,60,80))
+            a_label = list(current_event.options.keys())[0]
+            b_label = list(current_event.options.keys())[1]
+            draw_text(screen, f"A) {a_label}", panel.left + 24, panel.top + 148, size=20, color=(20,40,60))
+            draw_text(screen, f"B) {b_label}", panel.left + 24, panel.top + 178, size=20, color=(20,40,60))
+            draw_text(screen, "Pressione A ou B", panel.centerx, panel.bottom - 28, size=18, color=(80,110,140), center=True)
+
+        # Toasts
+        draw_messages()
+
+        # Tooltips HUD
+        hovered_any = False
+        for key, r in top_rect_map.items():
+            if r.collidepoint(mx, my):
+                begin_hover(key); hovered_any = True; break
+        if not hovered_any: clear_hover()
+        if hover_key and (pg.time.get_ticks() - hover_start_ms >= TOOLTIP_DELAY_MS):
+            tip = None
+            if hover_key == "unemployment":
+                tip = (
+                    f"Empregos comerciais: {jobs_com}\n"
+                    f"Empregos fábrica: {jobs_ind}\n"
+                    f"Força de trabalho disponível (comercial): {labor_com}\n"
+                    f"Força de trabalho disponível (fábrica): {labor_ind}"
+                )
+            elif hover_key == "smile":
+                tip = (
+                    "Felicidade é afetada por:\n"
+                    "- Desemprego, Inflação\n"
+                    "- Energia/Água insuficientes\n"
+                    "- Superlotação\n"
+                    "- Poluição (indústria/favela/ruas)\n"
+                    "+ Parques"
+                )
+            elif hover_key in ("withdraw", "treasury_bar"):
+                ok, reason = can_withdraw_now()
+                tip = (
+                    f"Acumulado: ${int(state.treasury_pending)} / ${int(state.treasury_cap)}\n"
+                    f"Mínimo p/ sacar: ${int(MIN_WITHDRAW_THRESHOLD)}\n"
+                    f"Status: {'Pronto para sacar' if ok else reason}"
+                )
+            elif hover_key == "bolt":
+                tip = f"Capacidade: {int(state.power_cap)}  | Uso aprox./dia: auto\nDica: construa 'Usina' para aumentar."
+            elif hover_key == "water":
+                tip = f"Capacidade: {int(state.water_cap)}  | Uso aprox./dia: auto\nDica: construa 'ETA (Água)' para aumentar."
+            else:
+                tip = TOOLTIPS.get(hover_key)
+            if tip: draw_tooltip(tip, (mx, my))
+
+        pg.display.flip()
+
+    pg.quit()
+
+if __name__ == "__main__":
+    main()
